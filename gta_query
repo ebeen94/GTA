@@ -1,0 +1,214 @@
+-- open data
+select count(*)
+from gta_table;
+
+select *
+from gta_table;
+
+-- 1.Preprocess data (Remove, Standardize Format, Correct Datatype)
+-- Remove null
+select count(*) as null_cnt
+from gta_table
+where address is null;
+
+-- Remove vacant land
+select *
+from gta_table
+where property_type = 'Vacant Land';
+
+delete from gta_table
+where property_type = 'Vacant Land';
+
+-- Remove NaN 
+delete from gta_table
+where bedrooms = 'NaN';
+
+-- Remove duplicate/ unavailable address 
+select count(distinct address)
+from gta_table;
+    
+with CTE_unique as(
+    select distinct address
+    from gta_table)
+delete from gta_table
+where address not in (select * from CTE_unique);
+
+delete from gta_table
+where address ~ 'Address not available';
+
+-- Standardize the format of rent column
+update gta_table
+set leaserent = regexp_replace(
+    ltrim(split_part(leaserent, '/', 1), '$'),
+    ',', '')
+
+-- Standardize the format of bedrooms column
+select split_part(bedrooms, '+', 1)
+from gta_table
+
+update gta_table
+set bedrooms = split_part(bedrooms, '+', 1)
+
+-- Correct datatype
+alter table gta_table
+alter column bedrooms type integer
+using bedrooms::integer;
+
+alter table gta_table
+alter column leaserent type integer
+using leaserent::integer;
+
+
+-- 2. Add new columns 
+-- New column for basement apartments
+alter table gta_table
+add column housing_type varchar(10);
+
+select *
+from gta_table
+where address ~* any('{bsmnt, bsmt, basement, basemen, lower, bsment, bsement}')
+      or split_part(address, ' ', 1) ~* any('{B1, B2, #B, #REAR}')
+      or publicremarks ~* 'basement apartment';
+      
+
+update gta_table
+set housing_type = 'basement'
+where address ~* any('{bsmnt, bsmt, basement, basemen, lower, bsment, bsement}')
+      or split_part(address, ' ', 1) ~* any('{B1, B2, #B, #REAR}')
+      or publicremarks ~* any('{basement bachelor, lower level, bedroom basement, basement unit, basement apartment}');
+
+--- New column for shared apartments
+alter table gta_table
+add column roommate varchar(10);
+
+select *
+from gta_table
+where address ~* any ('{room, roommate}')
+or publicremarks ~* any('{roommate}')
+
+update gta_table
+set roommate = 'roommate'
+where address ~* any ('{room, roommate}')
+or publicremarks ~* any('{roommate, room rental}');
+                                           
+
+-- New column for city
+alter table gta_table
+add column city varchar(50);
+
+select split_part(split_part(address, '|', 2), ',', 1)
+from gta_table;
+
+update gta_table
+set city = split_part(split_part(address, '|', 2), ',', 1);
+
+
+                      
+-- 3. Explore 
+-- Percentage of basements, shared, shared basements
+select round(100*(count(*) filter (where roommate = 'roommate')::decimal/ count(*)::decimal),1) as shared,
+        round(100*(count(*) filter (where housing_type ='basement')::decimal/count(*)::decimal),1) as basement,
+        round(100*(count(*) filter (where roommate = 'roommate' 
+                        and housing_type = 'basement')::decimal/count(*)::decimal),1) as shared_basement
+from gta_table;
+
+-- Total number of available housing for each city
+select city, count(*) as total_housing
+from gta_table
+group by city
+order by 2 desc;
+
+-- Avg rent price per city (remove city with less than 20 housing for reliable avg)
+select city, 
+        round(avg(leaserent::decimal), 0) as avg_rent,
+        count(*) as num_housing
+from gta_table
+group by 1
+having count(*) >= 20
+order by 2;
+
+-- Percentage of basements, shared, shared basements per city
+select city, 
+        count(*) as num_housing, 
+        round(avg(leaserent::decimal),2) as avg_rent, 
+        percentile_disc(0.5) within group (order by leaserent) as rent_50th_perc,
+        round(avg(bedrooms::decimal),2) as beds,
+        percentile_disc(0.5) within group (order by bedrooms) as bed_50th_perc,
+        round(100*(count(*) filter (where roommate = 'roommate')::decimal/ count(*)::decimal),1) as shared,
+        round(100*(count(*) filter (where housing_type ='basement')::decimal/count(*)::decimal),1) as basement,
+        round(100*(count(*) filter (where roommate = 'roommate' 
+                        and housing_type = 'basement')::decimal/count(*)::decimal),1) as shared_basement
+from gta_table
+group by 1
+having count(*) >= 20
+order by 3,4;
+
+
+--- cities that have more than 20 houses available in the market
+select *
+from gta_table
+where city in (select city
+              from gta_table
+              group by city
+              having count(*) >= 20)
+
+--- cities adjacent to Toronto
+select *
+from gta_table
+where city ~* ('Toronto|Mississauga|Brampton|Vaughan|Markham|Pickering')
+
+              
+-- what is the avg price depending on roomtype and roommate in cities adjacent to Toronto
+---Toronto, Mississauga, Brampton, Vaughan, Markham, Pickering
+select city,
+        housing_type, 
+        roommate, 
+        round(avg(leaserent::decimal), 0) as avg_price,
+        count(*) as num_housing
+from gta_table
+where city ~* ('Toronto|Mississauga|Brampton|Vaughan|Markham|Pickering')
+group by 1,2,3
+order by 4,1;
+
+-- Cheapest city adjacent to Toronto that you can on the ground floor alone
+select city, 
+        round(avg(leaserent::decimal),2) as average, 
+        percentile_disc(0.5) within group (order by leaserent) as median
+from gta_table
+where housing_type is null
+and roommate is null
+and city ~* ('Toronto|Mississauga|Brampton|Vaughan|Markham|Pickering')
+group by 1
+order by 2
+
+-- Min price you can pay to live without a roommate on a groundlevel in Toronto
+select min(leaserent) as min_rent
+from gta_table
+where city ~* 'toronto'
+and roommate is null
+and housing_type is null
+
+
+-- list houses within + 100 range of the above minimum price 
+with CTE_m as(
+    select min(leaserent) as min_rent
+    from gta_table
+    where city ~* 'toronto'
+    and roommate is null
+    and housing_type is null)
+select *
+from gta_table
+left join CTE_m on true
+where city ~* 'toronto'
+and roommate is null
+and housing_type is null 
+and leaserent <= CTE_m.min_rent + 200
+
+
+
+
+
+
+
+
+
